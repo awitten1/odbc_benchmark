@@ -18,7 +18,9 @@ pushd $dir
 mkdir -p data_dir
 
 if [ $1 = "start" ]; then
-    /usr/lib/postgresql/17/bin/pg_ctl init -D data_dir
+    if [ ! -f data_dir/PG_VERSION ]; then
+        /usr/lib/postgresql/17/bin/pg_ctl init -D data_dir
+    fi
     /usr/lib/postgresql/17/bin/pg_ctl start -D data_dir
 elif [ $1 = "stop" ]; then
     /usr/lib/postgresql/17/bin/pg_ctl stop -D data_dir -m fast

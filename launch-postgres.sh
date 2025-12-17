@@ -1,7 +1,7 @@
 #!/bin/bash
 
 #
-# After running this script connect to postgres with `psql -d postgres`.
+# After running this script connect to postgres with `psql "host=localhost port=5432 dbname=postgres"`.
 #
 
 set -eux

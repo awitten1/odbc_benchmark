@@ -15,3 +15,5 @@ target_compile_options(main PUBLIC ${ODBC_CFLAGS_OTHER})
 find_package(PostgreSQL REQUIRED)
 
 target_link_libraries(main PRIVATE PostgreSQL::PostgreSQL)
+
+set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO} -O3 -march=native")

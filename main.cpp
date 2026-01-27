@@ -1,6 +1,7 @@
 
 #include <cstdlib>
 #include <memory>
+#include <postgresql/libpq-fe.h>
 #include <sqltypes.h>
 #include <sstream>
 #include <stdexcept>
@@ -14,7 +15,7 @@
 
 struct Args {
     std::string password;
-    uint16_t port;
+    uint16_t port = 0;
     std::string host;
     std::string dbname;
     std::string user;
@@ -62,6 +63,7 @@ PGconn* connect(Args args) {
     std::cout << "connecting to " << s << std::endl;
     PGconn* c = PQconnectdb(s.c_str());
     if (PQstatus(c) != CONNECTION_OK) {
+        std::cerr << PQerrorMessage(c) << std::endl;
         fprintf(stderr, "failed to connect to postgres\n");
         exit(EXIT_FAILURE);
     }
@@ -84,7 +86,7 @@ void print_pg_result(PGresult* result) {
 
 void use_synchronous_libpq(PGconn* conn, const char* query) {
     PGresult* result = PQexec(conn, query);
-    print_pg_result(result);
+    //print_pg_result(result);
     PQclear(result);
 }
 
@@ -102,7 +104,7 @@ void use_async_libpq(PGconn* conn, const char* query, int chunk_size = 1000) {
         if (!result) {
             break;
         }
-        print_pg_result(result);
+        //print_pg_result(result);
         PQclear(result);
     }
 

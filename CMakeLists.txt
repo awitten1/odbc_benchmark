@@ -12,8 +12,10 @@ target_link_libraries(main PRIVATE ${ODBC_LIBRARIES})
 target_include_directories(main PUBLIC ${ODBC_INCLUDE_DIRS})
 target_compile_options(main PUBLIC ${ODBC_CFLAGS_OTHER})
 
-find_package(PostgreSQL REQUIRED)
-
-target_link_libraries(main PRIVATE PostgreSQL::PostgreSQL)
+pkg_check_modules(LIBPQ REQUIRED libpq)
+target_link_libraries(main PRIVATE ${LIBPQ_LIBRARIES})
+target_include_directories(main PUBLIC ${LIBPQ_INCLUDE_DIRS})
+target_compile_options(main PUBLIC ${LIBPQ_CFLAGS_OTHER})
 
 set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO} -O3 -march=native")
+install(TARGETS main)

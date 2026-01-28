@@ -1,5 +1,6 @@
 
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <postgresql/libpq-fe.h>
 #include <sqltypes.h>
@@ -12,20 +13,19 @@
 #include <libpq-fe.h>
 #include <string>
 #include <iostream>
-#include "adbc.h"
+#include "adbc_utils.h"
 
 // Ignoring error handling
-struct AdbcDatabase database;
-AdbcDatabaseNew(&database, nullptr);
-AdbcDatabaseSetOption(&database, "uri", "postgresql://localhost:5433", nullptr);
-AdbcDatabaseInit(&database, nullptr);
 struct Args {
     std::string password;
     uint16_t port = 0;
     std::string host;
     std::string dbname;
     std::string user;
+    std::string dsn;
+    std::string driver;
     bool use_async_libpq = false;
+    std::string mode = "libpq";
 };
 
 Args parse_cli_params(int argc, char** argv) {
@@ -50,8 +50,14 @@ Args parse_cli_params(int argc, char** argv) {
             args.dbname = value;
         } else if (key == "--user") {
             args.user = value;
+        } else if (key == "--dsn") {
+            args.dsn = value;
+        } else if (key == "--driver") {
+            args.driver = value;
         } else if (key == "--use_async") {
             args.use_async_libpq = value == "true";
+        } else if (key == "--mode") {
+            args.mode = value;
         } else {
             std::cerr << "unknown key " << key << std::endl;
             exit(EXIT_FAILURE);
@@ -116,19 +122,167 @@ void use_async_libpq(PGconn* conn, const char* query, int chunk_size = 1000) {
 
 }
 
+void use_odbc(const Args& args, const char* query) {
+    SQLHENV env = SQL_NULL_HENV;
+    SQLHDBC dbc = SQL_NULL_HDBC;
+    SQLHSTMT stmt = SQL_NULL_HSTMT;
+
+    if (SQLAllocHandle(SQL_HANDLE_ENV, SQL_NULL_HANDLE, &env) != SQL_SUCCESS) {
+        return;
+    }
+    if (SQLSetEnvAttr(env, SQL_ATTR_ODBC_VERSION, (SQLPOINTER)SQL_OV_ODBC3, 0) !=
+        SQL_SUCCESS) {
+        SQLFreeHandle(SQL_HANDLE_ENV, env);
+        return;
+    }
+    if (SQLAllocHandle(SQL_HANDLE_DBC, env, &dbc) != SQL_SUCCESS) {
+        SQLFreeHandle(SQL_HANDLE_ENV, env);
+        return;
+    }
+
+    std::ostringstream cs;
+    if (!args.dsn.empty()) {
+        cs << "DSN=" << args.dsn << ";";
+    } else {
+        const std::string driver = args.driver.empty() ? "PostgreSQL Unicode" : args.driver;
+        cs << "Driver={" << driver << "};";
+    }
+    if (!args.host.empty()) {
+        cs << "Server=" << args.host << ";";
+    }
+    if (args.port != 0) {
+        cs << "Port=" << args.port << ";";
+    }
+    if (!args.dbname.empty()) {
+        cs << "Database=" << args.dbname << ";";
+    }
+    if (!args.user.empty()) {
+        cs << "Uid=" << args.user << ";";
+    }
+    if (!args.password.empty()) {
+        cs << "Pwd=" << args.password << ";";
+    }
+    const std::string conn_str = cs.str();
+
+    SQLCHAR out_conn[1024];
+    SQLSMALLINT out_len = 0;
+    SQLRETURN rc = SQLDriverConnect(
+        dbc,
+        nullptr,
+        (SQLCHAR*)conn_str.c_str(),
+        SQL_NTS,
+        out_conn,
+        sizeof(out_conn),
+        &out_len,
+        SQL_DRIVER_NOPROMPT);
+    if (!(rc == SQL_SUCCESS || rc == SQL_SUCCESS_WITH_INFO)) {
+        SQLFreeHandle(SQL_HANDLE_DBC, dbc);
+        SQLFreeHandle(SQL_HANDLE_ENV, env);
+        return;
+    }
+
+    if (SQLAllocHandle(SQL_HANDLE_STMT, dbc, &stmt) != SQL_SUCCESS) {
+        SQLDisconnect(dbc);
+        SQLFreeHandle(SQL_HANDLE_DBC, dbc);
+        SQLFreeHandle(SQL_HANDLE_ENV, env);
+        return;
+    }
+
+    rc = SQLExecDirect(stmt, (SQLCHAR*)query, SQL_NTS);
+    if (rc == SQL_SUCCESS || rc == SQL_SUCCESS_WITH_INFO) {
+        while (SQLFetch(stmt) == SQL_SUCCESS) {
+            // Intentionally ignore result data for benchmarking.
+        }
+    }
+
+    SQLFreeHandle(SQL_HANDLE_STMT, stmt);
+    SQLDisconnect(dbc);
+    SQLFreeHandle(SQL_HANDLE_DBC, dbc);
+    SQLFreeHandle(SQL_HANDLE_ENV, env);
+}
+
+int use_adbc(const Args& args, const char* query) {
+    struct AdbcError error = {};
+    struct AdbcDatabase database = {};
+    struct AdbcConnection connection = {};
+    struct AdbcStatement statement = {};
+
+    std::ostringstream os;
+    os << "postgresql://";
+    if (!args.user.empty()) {
+        os << args.user;
+        if (!args.password.empty()) {
+            os << ":" << args.password;
+        }
+        os << "@";
+    }
+    os << args.host;
+    if (args.port != 0) {
+        os << ":" << args.port;
+    }
+    if (!args.dbname.empty()) {
+        os << "/" << args.dbname;
+    }
+    std::string uri = os.str();
+
+    CHECK_ADBC(AdbcDatabaseNew(&database, &error));
+    CHECK_ADBC(AdbcDatabaseSetOption(&database, "uri", uri.c_str(), &error));
+    CHECK_ADBC(AdbcDatabaseInit(&database, &error));
+    CHECK_ADBC(AdbcConnectionNew(&connection, &error));
+    CHECK_ADBC(AdbcConnectionInit(&connection, &database, &error));
+    CHECK_ADBC(AdbcStatementNew(&connection, &statement, &error));
+    CHECK_ADBC(AdbcStatementSetSqlQuery(&statement, query, &error));
+
+    struct ArrowArrayStream stream = {};
+    int64_t rows_affected = -1;
+    CHECK_ADBC(AdbcStatementExecuteQuery(&statement, &stream, &rows_affected, &error));
+
+    struct ArrowSchema schema = {};
+    CHECK_STREAM(stream, stream.get_schema(&stream, &schema));
+    if (schema.release != nullptr) {
+        schema.release(&schema);
+    }
+    for (;;) {
+        struct ArrowArray array = {};
+        CHECK_STREAM(stream, stream.get_next(&stream, &array));
+        if (array.release == nullptr) {
+            break;
+        }
+        array.release(&array);
+    }
+    if (stream.release != nullptr) {
+        stream.release(&stream);
+    }
+
+    CHECK_ADBC(AdbcStatementRelease(&statement, &error));
+    CHECK_ADBC(AdbcConnectionRelease(&connection, &error));
+    CHECK_ADBC(AdbcDatabaseRelease(&database, &error));
+    return EXIT_SUCCESS;
+}
+
 int main(int argc, char** argv) {
     Args args = parse_cli_params(argc, argv);
-    auto free_pg_conn = [](PGconn* conn) {
-        PQfinish(conn);
-    };
-    std::unique_ptr<PGconn,decltype(free_pg_conn)> conn(
-        connect(args),free_pg_conn);
+
 
     const char* query = "select * from x;";
-    if (!args.use_async_libpq) {
-        use_synchronous_libpq(conn.get(), query);
-    } else {
-        use_async_libpq(conn.get(), query);
+    if (args.mode == "libpq") {
+        auto free_pg_conn = [](PGconn* conn) {
+            PQfinish(conn);
+        };
+        std::unique_ptr<PGconn,decltype(free_pg_conn)> conn(
+            connect(args),free_pg_conn);
+        if (!args.use_async_libpq) {
+            use_synchronous_libpq(conn.get(), query);
+        } else {
+            use_async_libpq(conn.get(), query);
+        }
+    } else if (args.mode == "adbc") {
+        int status = use_adbc(args, query);
+        if (status != EXIT_SUCCESS) {
+            return status;
+        }
+    } else if (args.mode == "odbc") {
+        use_odbc(args, query);
     }
 
 

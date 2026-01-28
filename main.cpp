@@ -12,7 +12,13 @@
 #include <libpq-fe.h>
 #include <string>
 #include <iostream>
+#include "adbc.h"
 
+// Ignoring error handling
+struct AdbcDatabase database;
+AdbcDatabaseNew(&database, nullptr);
+AdbcDatabaseSetOption(&database, "uri", "postgresql://localhost:5433", nullptr);
+AdbcDatabaseInit(&database, nullptr);
 struct Args {
     std::string password;
     uint16_t port = 0;

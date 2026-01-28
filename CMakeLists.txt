@@ -17,5 +17,8 @@ target_link_libraries(main PRIVATE ${LIBPQ_LIBRARIES})
 target_include_directories(main PUBLIC ${LIBPQ_INCLUDE_DIRS})
 target_compile_options(main PUBLIC ${LIBPQ_CFLAGS_OTHER})
 
+find_package(AdbcDriverPostgreSQL CONFIG REQUIRED)
+target_link_libraries(main PUBLIC AdbcDriverPostgreSQL::adbc_driver_postgresql_static)
+
 set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO} -O3 -march=native")
 install(TARGETS main)

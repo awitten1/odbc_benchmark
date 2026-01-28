@@ -1,3 +1,9 @@
 [submodule "postgres"]
-	path = postgres
+	path = deps/postgres
 	url = git@github.com:postgres/postgres.git
+[submodule "arrow-adbc"]
+	path = deps/arrow-adbc
+	url = git@github.com:apache/arrow-adbc.git
+[submodule "deps/arrow-nanoarrow"]
+	path = deps/arrow-nanoarrow
+	url = git@github.com:apache/arrow-nanoarrow.git

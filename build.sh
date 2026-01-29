@@ -70,6 +70,7 @@ build_project() {
     mkdir -p install
 
     cmake -S deps/arrow-nanoarrow -B nanoarrow_build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+        -DCMAKE_CXX_FLAGS_RELWITHDEBINFO="-O3 -march=native" \
         -DCMAKE_INSTALL_PREFIX="$INSTALL_DIR"
     cmake --build nanoarrow_build -j4
     cmake --install nanoarrow_build
@@ -77,6 +78,7 @@ build_project() {
     cmake -S deps/arrow-adbc/c -B arrowadbc_build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
         -DADBC_DRIVER_MANAGER=ON \
         -DADBC_DRIVER_POSTGRESQL=ON \
+        -DCMAKE_CXX_FLAGS_RELWITHDEBINFO="-O3 -march=native" \
         -DCMAKE_INSTALL_PREFIX="$INSTALL_DIR" -DCMAKE_PREFIX_PATH="$INSTALL_DIR"
     cmake --build arrowadbc_build -j4
     cmake --install arrowadbc_build

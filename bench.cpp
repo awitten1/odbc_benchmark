@@ -62,7 +62,13 @@ static Args parse_cli_params_lenient(int argc, char** argv) {
 
 static std::string make_query(int64_t tuples) {
     std::ostringstream os;
-    os << "select * from x limit " << tuples << ";";
+    os << "select * from x order by x limit " << tuples << ";";
+    return os.str();
+}
+
+static std::string make_copy_query(int64_t tuples) {
+    std::ostringstream os;
+    os << "copy (select * from x order by x limit " << tuples << ") to stdout with (format binary);";
     return os.str();
 }
 
@@ -99,6 +105,42 @@ static void use_async_libpq(PGconn* conn, const char* query, int chunk_size = 10
         }
         PQclear(result);
     }
+}
+
+static bool use_copy_to_stdout_libpq(PGconn* conn, const char* query) {
+    PGresult* result = PQexec(conn, query);
+    if (!result) {
+        return false;
+    }
+    if (PQresultStatus(result) != PGRES_COPY_OUT) {
+        PQclear(result);
+        return false;
+    }
+    PQclear(result);
+
+    for (;;) {
+        char* buf = nullptr;
+        int len = PQgetCopyData(conn, &buf, 0);
+        if (len > 0) {
+            PQfreemem(buf);
+            continue;
+        }
+        if (len == -1) {
+            break;
+        }
+        if (len == -2) {
+            return false;
+        }
+    }
+
+    for (;;) {
+        PGresult* r = PQgetResult(conn);
+        if (!r) {
+            break;
+        }
+        PQclear(r);
+    }
+    return true;
 }
 
 struct OdbcHandles {
@@ -248,6 +290,27 @@ static void BenchLibpqAsync(benchmark::State& state) {
     state.SetItemsProcessed(state.iterations() * tuples);
 }
 
+static void BenchLibpqCopyToStdout(benchmark::State& state) {
+    const int64_t tuples = state.range(0);
+    const std::string query = make_copy_query(tuples);
+
+    PGconn* conn = connect_libpq(g_args);
+    if (!conn) {
+        state.SkipWithError("libpq connect failed");
+        return;
+    }
+
+    for (auto _ : state) {
+        if (!use_copy_to_stdout_libpq(conn, query.c_str())) {
+            state.SkipWithError("libpq copy to stdout failed");
+            break;
+        }
+    }
+
+    PQfinish(conn);
+    state.SetItemsProcessed(state.iterations() * tuples);
+}
+
 static void BenchOdbc(benchmark::State& state) {
     const int64_t tuples = state.range(0);
     const std::string query = make_query(tuples);
@@ -356,6 +419,7 @@ int main(int argc, char** argv) {
 
     benchmark::RegisterBenchmark("libpq_sync", BenchLibpqSync)->Arg(g_tuples);
     benchmark::RegisterBenchmark("libpq_async", BenchLibpqAsync)->Arg(g_tuples);
+    benchmark::RegisterBenchmark("libpq_copy_stdout", BenchLibpqCopyToStdout)->Arg(g_tuples);
     benchmark::RegisterBenchmark("odbc", BenchOdbc)->Arg(g_tuples);
     benchmark::RegisterBenchmark("adbc", BenchAdbc)->Arg(g_tuples);
 

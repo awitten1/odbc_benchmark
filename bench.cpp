@@ -216,21 +216,17 @@ static void BenchLibpqSync(benchmark::State& state) {
     const int64_t tuples = state.range(0);
     const std::string query = make_query(tuples);
 
-    state.PauseTiming();
     PGconn* conn = connect_libpq(g_args);
     if (!conn) {
         state.SkipWithError("libpq connect failed");
         return;
     }
-    state.ResumeTiming();
 
     for (auto _ : state) {
         use_synchronous_libpq(conn, query.c_str());
     }
 
-    state.PauseTiming();
     PQfinish(conn);
-    state.ResumeTiming();
     state.SetItemsProcessed(state.iterations() * tuples);
 }
 
@@ -238,21 +234,17 @@ static void BenchLibpqAsync(benchmark::State& state) {
     const int64_t tuples = state.range(0);
     const std::string query = make_query(tuples);
 
-    state.PauseTiming();
     PGconn* conn = connect_libpq(g_args);
     if (!conn) {
         state.SkipWithError("libpq connect failed");
         return;
     }
-    state.ResumeTiming();
 
     for (auto _ : state) {
         use_async_libpq(conn, query.c_str());
     }
 
-    state.PauseTiming();
     PQfinish(conn);
-    state.ResumeTiming();
     state.SetItemsProcessed(state.iterations() * tuples);
 }
 
@@ -260,14 +252,12 @@ static void BenchOdbc(benchmark::State& state) {
     const int64_t tuples = state.range(0);
     const std::string query = make_query(tuples);
 
-    state.PauseTiming();
     OdbcHandles handles;
     if (!odbc_connect(g_args, &handles)) {
         odbc_disconnect(&handles);
         state.SkipWithError("ODBC connect failed");
         return;
     }
-    state.ResumeTiming();
 
     for (auto _ : state) {
         SQLRETURN rc = SQLExecDirect(handles.stmt, (SQLCHAR*)query.c_str(), SQL_NTS);
@@ -278,9 +268,7 @@ static void BenchOdbc(benchmark::State& state) {
         SQLCloseCursor(handles.stmt);
     }
 
-    state.PauseTiming();
     odbc_disconnect(&handles);
-    state.ResumeTiming();
     state.SetItemsProcessed(state.iterations() * tuples);
 }
 
@@ -288,7 +276,6 @@ static void BenchAdbc(benchmark::State& state) {
     const int64_t tuples = state.range(0);
     const std::string query = make_query(tuples);
 
-    state.PauseTiming();
     struct AdbcError error = {};
     struct AdbcDatabase database = {};
     struct AdbcConnection connection = {};
@@ -321,7 +308,6 @@ static void BenchAdbc(benchmark::State& state) {
         state.SkipWithError(ex.what());
         return;
     }
-    state.ResumeTiming();
 
     for (auto _ : state) {
         struct AdbcStatement statement = {};
@@ -360,10 +346,8 @@ static void BenchAdbc(benchmark::State& state) {
         }
     }
 
-    state.PauseTiming();
     AdbcConnectionRelease(&connection, &error);
     AdbcDatabaseRelease(&database, &error);
-    state.ResumeTiming();
     state.SetItemsProcessed(state.iterations() * tuples);
 }
 
@@ -377,5 +361,6 @@ int main(int argc, char** argv) {
 
     benchmark::Initialize(&argc, argv);
     benchmark::RunSpecifiedBenchmarks();
+    benchmark::Shutdown();
     return 0;
 }

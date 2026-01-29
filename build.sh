@@ -64,27 +64,27 @@ install_google_benchmark() {
 build_project() {
     mkdir -p "$INSTALL_DIR"
     (cd deps/postgres && CFLAGS="-O3 -march=native -g" CXXFLAGS="-O3 -march=native -g" \
-        ./configure --prefix=$(realpath ../../deps_install/))
+        ./configure --prefix="$INSTALL_DIR")
     (cd deps/postgres && make -j6 && make install)
 
     mkdir -p install
 
     cmake -S deps/arrow-nanoarrow -B nanoarrow_build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-        -DCMAKE_INSTALL_PREFIX=$(realpath ./deps_install)
+        -DCMAKE_INSTALL_PREFIX="$INSTALL_DIR"
     cmake --build nanoarrow_build -j4
     cmake --install nanoarrow_build
 
     cmake -S deps/arrow-adbc/c -B arrowadbc_build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
         -DADBC_DRIVER_MANAGER=ON \
         -DADBC_DRIVER_POSTGRESQL=ON \
-        -DCMAKE_INSTALL_PREFIX=$(realpath ./deps_install) -DCMAKE_PREFIX_PATH=$(realpath ./deps_install)
+        -DCMAKE_INSTALL_PREFIX="$INSTALL_DIR" -DCMAKE_PREFIX_PATH="$INSTALL_DIR"
     cmake --build arrowadbc_build -j4
     cmake --install arrowadbc_build
 
     cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-        -DCMAKE_PREFIX_PATH=$(realpath ./deps_install) \
-        -DCMAKE_INSTALL_RPATH=./deps_install/lib \
-        -DCMAKE_INSTALL_PREFIX=$(realpath ./install)
+        -DCMAKE_PREFIX_PATH="$INSTALL_DIR" \
+        -DCMAKE_INSTALL_RPATH="./deps_install/lib" \
+        -DCMAKE_INSTALL_PREFIX="$DIR/install"
 
     cmake --build build
     cmake --install build

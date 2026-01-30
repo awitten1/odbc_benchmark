@@ -98,6 +98,18 @@ void print_pg_result(PGresult* result) {
 
 void use_synchronous_libpq(PGconn* conn, const char* query) {
     PGresult* result = PQexec(conn, query);
+    if (!result) {
+        fprintf(stderr, "libpq sync exec failed: %s", PQerrorMessage(conn));
+        return;
+    }
+    ExecStatusType status = PQresultStatus(result);
+    if (status != PGRES_TUPLES_OK && status != PGRES_COMMAND_OK) {
+        const char* msg = PQresultErrorMessage(result);
+        if (!msg || msg[0] == '\0') {
+            msg = PQerrorMessage(conn);
+        }
+        fprintf(stderr, "libpq sync exec bad status (%s): %s", PQresStatus(status), msg);
+    }
     //print_pg_result(result);
     PQclear(result);
 }
@@ -111,13 +123,27 @@ void use_async_libpq(PGconn* conn, const char* query, int chunk_size = 1000) {
 
     PQsetChunkedRowsMode(conn, chunk_size);
 
+    bool saw_result = false;
     for (;;) {
         PGresult* result = PQgetResult(conn);
         if (!result) {
             break;
         }
+        saw_result = true;
+        ExecStatusType status = PQresultStatus(result);
+        if (status != PGRES_TUPLES_OK && status != PGRES_COMMAND_OK &&
+            status != PGRES_SINGLE_TUPLE && status != PGRES_TUPLES_CHUNK) {
+            const char* msg = PQresultErrorMessage(result);
+            if (!msg || msg[0] == '\0') {
+                msg = PQerrorMessage(conn);
+            }
+            fprintf(stderr, "libpq async exec bad status (%s): %s", PQresStatus(status), msg);
+        }
         //print_pg_result(result);
         PQclear(result);
+    }
+    if (!saw_result) {
+        fprintf(stderr, "libpq async exec returned no results: %s", PQerrorMessage(conn));
     }
 
 }

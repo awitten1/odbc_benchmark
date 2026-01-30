@@ -14,15 +14,16 @@
 #include <libpq-fe.h>
 #include <sys/resource.h>
 #include <string>
+#include <unistd.h>
 
 #include "adbc_utils.h"
 
 struct Args {
     std::string password;
-    uint16_t port = 0;
-    std::string host;
-    std::string dbname;
-    std::string user;
+    uint16_t port = 5432;
+    std::string host = "localhost";
+    std::string dbname = "postgres";
+    std::string user = getlogin();
     std::string dsn;
     std::string driver;
 };
@@ -88,6 +89,25 @@ static PGconn* connect_libpq(const Args& args) {
 
 static void use_synchronous_libpq(PGconn* conn, const char* query) {
     PGresult* result = PQexec(conn, query);
+    if (!result) {
+        return;
+    }
+    ExecStatusType status = PQresultStatus(result);
+    if (status == PGRES_TUPLES_OK || status == PGRES_SINGLE_TUPLE ||
+        status == PGRES_TUPLES_CHUNK) {
+        int nrows = PQntuples(result);
+        int ncols = PQnfields(result);
+        size_t total_bytes = 0;
+        for (int row = 0; row < nrows; ++row) {
+            for (int col = 0; col < ncols; ++col) {
+                if (!PQgetisnull(result, row, col)) {
+                    total_bytes += static_cast<size_t>(PQgetlength(result, row, col));
+                    (void)PQgetvalue(result, row, col);
+                }
+            }
+        }
+        benchmark::DoNotOptimize(total_bytes);
+    }
     PQclear(result);
 }
 
@@ -104,6 +124,22 @@ static void use_async_libpq(PGconn* conn, const char* query, int chunk_size = 10
         if (!result) {
             break;
         }
+        ExecStatusType status = PQresultStatus(result);
+        if (status == PGRES_TUPLES_OK || status == PGRES_SINGLE_TUPLE ||
+            status == PGRES_TUPLES_CHUNK) {
+            int nrows = PQntuples(result);
+            int ncols = PQnfields(result);
+            size_t total_bytes = 0;
+            for (int row = 0; row < nrows; ++row) {
+                for (int col = 0; col < ncols; ++col) {
+                    if (!PQgetisnull(result, row, col)) {
+                        total_bytes += static_cast<size_t>(PQgetlength(result, row, col));
+                        (void)PQgetvalue(result, row, col);
+                    }
+                }
+            }
+            benchmark::DoNotOptimize(total_bytes);
+        }
         PQclear(result);
     }
 }
@@ -119,10 +155,12 @@ static bool use_copy_to_stdout_libpq(PGconn* conn, const char* query) {
     }
     PQclear(result);
 
+    size_t total_bytes = 0;
     for (;;) {
         char* buf = nullptr;
         int len = PQgetCopyData(conn, &buf, 0);
         if (len > 0) {
+            total_bytes += static_cast<size_t>(len);
             PQfreemem(buf);
             continue;
         }
@@ -133,6 +171,7 @@ static bool use_copy_to_stdout_libpq(PGconn* conn, const char* query) {
             return false;
         }
     }
+    benchmark::DoNotOptimize(total_bytes);
 
     for (;;) {
         PGresult* r = PQgetResult(conn);
@@ -225,6 +264,19 @@ static void odbc_disconnect(OdbcHandles* handles) {
         SQLFreeHandle(SQL_HANDLE_ENV, handles->env);
         handles->env = SQL_NULL_HENV;
     }
+}
+
+static bool odbc_is_truncation(SQLHSTMT stmt) {
+    SQLCHAR state[6] = {};
+    SQLINTEGER native_error = 0;
+    SQLCHAR message[256] = {};
+    SQLSMALLINT message_len = 0;
+    SQLRETURN rc = SQLGetDiagRec(SQL_HANDLE_STMT, stmt, 1, state, &native_error,
+                                 message, sizeof(message), &message_len);
+    if (rc != SQL_SUCCESS && rc != SQL_SUCCESS_WITH_INFO) {
+        return false;
+    }
+    return std::string(reinterpret_cast<char*>(state)) == "01004";
 }
 
 static void check_adbc(AdbcStatusCode status, AdbcError* error) {
@@ -367,12 +419,58 @@ static void BenchOdbc(benchmark::State& state) {
     const CpuUsage cpu_start = read_cpu_usage();
 
     for (auto _ : state) {
+        size_t total_bytes = 0;
         SQLRETURN rc = SQLExecDirect(handles.stmt, (SQLCHAR*)query.c_str(), SQL_NTS);
         if (rc == SQL_SUCCESS || rc == SQL_SUCCESS_WITH_INFO) {
-            while (SQLFetch(handles.stmt) == SQL_SUCCESS) {
+            SQLSMALLINT cols = 0;
+            if (SQLNumResultCols(handles.stmt, &cols) == SQL_SUCCESS && cols > 0) {
+                std::string buffer(4096, '\0');
+                while (SQLFetch(handles.stmt) == SQL_SUCCESS) {
+                    for (SQLUSMALLINT col = 1; col <= cols; ++col) {
+                        for (;;) {
+                            SQLLEN out_len = 0;
+                            rc = SQLGetData(handles.stmt, col, SQL_C_BINARY,
+                                            buffer.data(), buffer.size(), &out_len);
+                            if (!(rc == SQL_SUCCESS || rc == SQL_SUCCESS_WITH_INFO)) {
+                                state.SkipWithError("ODBC fetch failed");
+                                break;
+                            }
+                            if (out_len == SQL_NULL_DATA) {
+                                break;
+                            }
+                            if (out_len == SQL_NO_TOTAL) {
+                                total_bytes += buffer.size();
+                            } else {
+                                total_bytes += static_cast<size_t>(
+                                    out_len < 0 ? 0 : out_len);
+                            }
+                            if (rc == SQL_SUCCESS) {
+                                break;
+                            }
+                            if (rc == SQL_SUCCESS_WITH_INFO &&
+                                !odbc_is_truncation(handles.stmt)) {
+                                break;
+                            }
+                        }
+                        if (state.skipped()) {
+                            break;
+                        }
+                    }
+                    if (state.skipped()) {
+                        break;
+                    }
+                }
+            } else {
+                state.SkipWithError("ODBC result metadata failed");
             }
+        } else {
+            state.SkipWithError("ODBC exec failed");
         }
         SQLCloseCursor(handles.stmt);
+        benchmark::DoNotOptimize(total_bytes);
+        if (state.skipped()) {
+            break;
+        }
     }
 
     const CpuUsage cpu_delta = diff_cpu_usage(read_cpu_usage(), cpu_start);

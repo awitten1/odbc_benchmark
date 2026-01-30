@@ -23,6 +23,10 @@ install_system_deps() {
 }
 
 install_libpfm() {
+    if [ -f "$INSTALL_DIR/lib/libpfm.a" ] || [ -f "$INSTALL_DIR/lib64/libpfm.a" ]; then
+        echo "libpfm already installed in $INSTALL_DIR"
+        return
+    fi
     mkdir -p "$SOURCE_DIR"
     pushd "$SOURCE_DIR"
     if [ ! -d "libpfm4" ]; then
@@ -36,6 +40,11 @@ install_libpfm() {
 
 install_google_benchmark() {
     local gbench_version=v1.9.4
+
+    if [ -f "$INSTALL_DIR/lib/libbenchmark.a" ] || [ -f "$INSTALL_DIR/lib64/libbenchmark.a" ]; then
+        echo "google benchmark already installed in $INSTALL_DIR"
+        return
+    fi
 
     mkdir -p "$SOURCE_DIR"
     mkdir -p "$BUILD_DIR/benchmark"
@@ -63,30 +72,49 @@ install_google_benchmark() {
 
 build_project() {
     mkdir -p "$INSTALL_DIR"
-    (cd deps/postgres && CFLAGS="-O3 -march=native -g" CXXFLAGS="-O3 -march=native -g" \
-        ./configure --prefix="$INSTALL_DIR")
-    (cd deps/postgres && make -j6 && make install)
+    if [ ! -f "$INSTALL_DIR/bin/postgres" ]; then
+        (cd deps/postgres && CFLAGS="-O3 -march=native -g" CXXFLAGS="-O3 -march=native -g" \
+            ./configure --prefix="$INSTALL_DIR")
+        (cd deps/postgres && make -j6 && make install)
+    else
+        echo "postgres already installed in $INSTALL_DIR"
+    fi
 
     mkdir -p install
 
-    cmake -S deps/arrow-nanoarrow -B nanoarrow_build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-        -DCMAKE_CXX_FLAGS_RELWITHDEBINFO="-O3 -march=native" \
-        -DCMAKE_INSTALL_PREFIX="$INSTALL_DIR"
-    cmake --build nanoarrow_build -j4
-    cmake --install nanoarrow_build
+    if [ ! -f "$INSTALL_DIR/lib/libnanoarrow_shared.so" ] && [ ! -f "$INSTALL_DIR/lib/libnanoarrow_shared.dylib" ]; then
+        cmake -S deps/arrow-nanoarrow -B nanoarrow_build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CXX_FLAGS_RELWITHDEBINFO="-O3 -march=native" \
+            -DCMAKE_INSTALL_PREFIX="$INSTALL_DIR"
+        cmake --build nanoarrow_build -j4
+        cmake --install nanoarrow_build
+    else
+        echo "nanoarrow already installed in $INSTALL_DIR"
+    fi
 
-    cmake -S deps/arrow-adbc/c -B arrowadbc_build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-        -DADBC_DRIVER_MANAGER=ON \
-        -DADBC_DRIVER_POSTGRESQL=ON \
-        -DCMAKE_CXX_FLAGS_RELWITHDEBINFO="-O3 -march=native" \
-        -DCMAKE_INSTALL_PREFIX="$INSTALL_DIR" -DCMAKE_PREFIX_PATH="$INSTALL_DIR"
-    cmake --build arrowadbc_build -j4
-    cmake --install arrowadbc_build
+    if [ ! -f "$INSTALL_DIR/lib/libadbc_driver_postgresql.so" ] && [ ! -f "$INSTALL_DIR/lib/libadbc_driver_postgresql.dylib" ]; then
+        cmake -S deps/arrow-adbc/c -B arrowadbc_build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DADBC_DRIVER_MANAGER=ON \
+            -DADBC_DRIVER_POSTGRESQL=ON \
+            -DCMAKE_CXX_FLAGS_RELWITHDEBINFO="-O3 -march=native" \
+            -DCMAKE_INSTALL_PREFIX="$INSTALL_DIR" -DCMAKE_PREFIX_PATH="$INSTALL_DIR"
+        cmake --build arrowadbc_build -j4
+        cmake --install arrowadbc_build
+    else
+        echo "arrow-adbc already installed in $INSTALL_DIR"
+    fi
 
-    cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-        -DCMAKE_PREFIX_PATH="$INSTALL_DIR" \
-        -DCMAKE_INSTALL_RPATH="./deps_install/lib" \
-        -DCMAKE_INSTALL_PREFIX="$DIR/install"
+    if [ ! -f "$DIR/install/bin/main" ]; then
+        cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_PREFIX_PATH="$INSTALL_DIR" \
+            -DCMAKE_INSTALL_RPATH="./deps_install/lib" \
+            -DCMAKE_INSTALL_PREFIX="$DIR/install"
+    elif [ ! -f "$DIR/build/build.ninja" ] && [ ! -f "$DIR/build/Makefile" ]; then
+        cmake -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_PREFIX_PATH="$INSTALL_DIR" \
+            -DCMAKE_INSTALL_RPATH="./deps_install/lib" \
+            -DCMAKE_INSTALL_PREFIX="$DIR/install"
+    fi
 
     cmake --build build
     cmake --install build

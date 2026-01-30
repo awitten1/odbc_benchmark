@@ -30,6 +30,7 @@ struct Args {
 
 static Args g_args;
 static int64_t g_tuples = 1000;
+static std::string g_tables_filter;
 
 static Args parse_cli_params_lenient(int argc, char** argv) {
     Args args;
@@ -57,20 +58,34 @@ static Args parse_cli_params_lenient(int argc, char** argv) {
             args.driver = value;
         } else if (key == "--tuples") {
             g_tuples = std::stoll(value);
+        } else if (key == "--tables") {
+            g_tables_filter = value;
         }
     }
     return args;
 }
 
-static std::string make_query(int64_t tuples) {
+struct TableSpec {
+    const char* name;
+    const char* pk;
+};
+
+static const TableSpec kTables[] = {
+    {"narrow", "id"},
+    {"wide", "id"},
+};
+
+static std::string make_query(const TableSpec& table, int64_t tuples) {
     std::ostringstream os;
-    os << "select * from x order by x limit " << tuples << ";";
+    os << "select * from bench." << table.name << " order by " << table.pk
+       << " limit " << tuples << ";";
     return os.str();
 }
 
-static std::string make_copy_query(int64_t tuples) {
+static std::string make_copy_query(const TableSpec& table, int64_t tuples) {
     std::ostringstream os;
-    os << "copy (select * from x order by x limit " << tuples << ") to stdout with (format binary);";
+    os << "copy (select * from bench." << table.name << " order by " << table.pk
+       << " limit " << tuples << ") to stdout with (format binary);";
     return os.str();
 }
 
@@ -154,6 +169,57 @@ static bool use_copy_to_stdout_libpq(PGconn* conn, const char* query) {
         return false;
     }
     PQclear(result);
+
+    size_t total_bytes = 0;
+    for (;;) {
+        char* buf = nullptr;
+        int len = PQgetCopyData(conn, &buf, 0);
+        if (len > 0) {
+            total_bytes += static_cast<size_t>(len);
+            PQfreemem(buf);
+            continue;
+        }
+        if (len == -1) {
+            break;
+        }
+        if (len == -2) {
+            return false;
+        }
+    }
+    benchmark::DoNotOptimize(total_bytes);
+
+    for (;;) {
+        PGresult* r = PQgetResult(conn);
+        if (!r) {
+            break;
+        }
+        PQclear(r);
+    }
+    return true;
+}
+
+static bool use_copy_to_stdout_libpq_async(PGconn* conn, const char* query) {
+    if (PQsendQuery(conn, query) == 0) {
+        return false;
+    }
+
+    PGresult* result = nullptr;
+    for (;;) {
+        result = PQgetResult(conn);
+        if (!result) {
+            return false;
+        }
+        ExecStatusType status = PQresultStatus(result);
+        if (status == PGRES_COPY_OUT) {
+            PQclear(result);
+            break;
+        }
+        if (status != PGRES_TUPLES_OK && status != PGRES_COMMAND_OK) {
+            PQclear(result);
+            return false;
+        }
+        PQclear(result);
+    }
 
     size_t total_bytes = 0;
     for (;;) {
@@ -330,9 +396,9 @@ static CpuUsage diff_cpu_usage(const CpuUsage& end, const CpuUsage& start) {
     return {end.user_s - start.user_s, end.sys_s - start.sys_s};
 }
 
-static void BenchLibpqSync(benchmark::State& state) {
+static void BenchLibpqSync(benchmark::State& state, const TableSpec& table) {
     const int64_t tuples = state.range(0);
-    const std::string query = make_query(tuples);
+    const std::string query = make_query(table, tuples);
 
     PGconn* conn = connect_libpq(g_args);
     if (!conn) {
@@ -350,13 +416,15 @@ static void BenchLibpqSync(benchmark::State& state) {
 
     PQfinish(conn);
     state.SetItemsProcessed(state.iterations() * tuples);
-    state.counters["cpu_user_s"] = cpu_delta.user_s;
-    state.counters["cpu_sys_s"] = cpu_delta.sys_s;
+    if (state.iterations() > 0) {
+        state.counters["cpu_user_ms"] = (cpu_delta.user_s * 1000.0) / state.iterations();
+        state.counters["cpu_sys_ms"] = (cpu_delta.sys_s * 1000.0) / state.iterations();
+    }
 }
 
-static void BenchLibpqAsync(benchmark::State& state) {
+static void BenchLibpqAsync(benchmark::State& state, const TableSpec& table) {
     const int64_t tuples = state.range(0);
-    const std::string query = make_query(tuples);
+    const std::string query = make_query(table, tuples);
 
     PGconn* conn = connect_libpq(g_args);
     if (!conn) {
@@ -374,13 +442,15 @@ static void BenchLibpqAsync(benchmark::State& state) {
 
     PQfinish(conn);
     state.SetItemsProcessed(state.iterations() * tuples);
-    state.counters["cpu_user_s"] = cpu_delta.user_s;
-    state.counters["cpu_sys_s"] = cpu_delta.sys_s;
+    if (state.iterations() > 0) {
+        state.counters["cpu_user_ms"] = (cpu_delta.user_s * 1000.0) / state.iterations();
+        state.counters["cpu_sys_ms"] = (cpu_delta.sys_s * 1000.0) / state.iterations();
+    }
 }
 
-static void BenchLibpqCopyToStdout(benchmark::State& state) {
+static void BenchLibpqCopyToStdout(benchmark::State& state, const TableSpec& table) {
     const int64_t tuples = state.range(0);
-    const std::string query = make_copy_query(tuples);
+    const std::string query = make_copy_query(table, tuples);
 
     PGconn* conn = connect_libpq(g_args);
     if (!conn) {
@@ -401,13 +471,44 @@ static void BenchLibpqCopyToStdout(benchmark::State& state) {
 
     PQfinish(conn);
     state.SetItemsProcessed(state.iterations() * tuples);
-    state.counters["cpu_user_s"] = cpu_delta.user_s;
-    state.counters["cpu_sys_s"] = cpu_delta.sys_s;
+    if (state.iterations() > 0) {
+        state.counters["cpu_user_ms"] = (cpu_delta.user_s * 1000.0) / state.iterations();
+        state.counters["cpu_sys_ms"] = (cpu_delta.sys_s * 1000.0) / state.iterations();
+    }
 }
 
-static void BenchOdbc(benchmark::State& state) {
+static void BenchLibpqAsyncCopyToStdout(benchmark::State& state, const TableSpec& table) {
     const int64_t tuples = state.range(0);
-    const std::string query = make_query(tuples);
+    const std::string query = make_copy_query(table, tuples);
+
+    PGconn* conn = connect_libpq(g_args);
+    if (!conn) {
+        state.SkipWithError("libpq connect failed");
+        return;
+    }
+
+    const CpuUsage cpu_start = read_cpu_usage();
+
+    for (auto _ : state) {
+        if (!use_copy_to_stdout_libpq_async(conn, query.c_str())) {
+            state.SkipWithError("libpq async copy to stdout failed");
+            break;
+        }
+    }
+
+    const CpuUsage cpu_delta = diff_cpu_usage(read_cpu_usage(), cpu_start);
+
+    PQfinish(conn);
+    state.SetItemsProcessed(state.iterations() * tuples);
+    if (state.iterations() > 0) {
+        state.counters["cpu_user_ms"] = (cpu_delta.user_s * 1000.0) / state.iterations();
+        state.counters["cpu_sys_ms"] = (cpu_delta.sys_s * 1000.0) / state.iterations();
+    }
+}
+
+static void BenchOdbc(benchmark::State& state, const TableSpec& table) {
+    const int64_t tuples = state.range(0);
+    const std::string query = make_query(table, tuples);
 
     OdbcHandles handles;
     if (!odbc_connect(g_args, &handles)) {
@@ -425,19 +526,22 @@ static void BenchOdbc(benchmark::State& state) {
             SQLSMALLINT cols = 0;
             if (SQLNumResultCols(handles.stmt, &cols) == SQL_SUCCESS && cols > 0) {
                 std::string buffer(4096, '\0');
-                while (SQLFetch(handles.stmt) == SQL_SUCCESS) {
-                    for (SQLUSMALLINT col = 1; col <= cols; ++col) {
-                        for (;;) {
-                            SQLLEN out_len = 0;
-                            rc = SQLGetData(handles.stmt, col, SQL_C_BINARY,
-                                            buffer.data(), buffer.size(), &out_len);
-                            if (!(rc == SQL_SUCCESS || rc == SQL_SUCCESS_WITH_INFO)) {
-                                state.SkipWithError("ODBC fetch failed");
-                                break;
-                            }
-                            if (out_len == SQL_NULL_DATA) {
-                                break;
-                            }
+                    while (SQLFetch(handles.stmt) == SQL_SUCCESS) {
+                        for (SQLUSMALLINT col = 1; col <= cols; ++col) {
+                            for (;;) {
+                                SQLLEN out_len = 0;
+                                rc = SQLGetData(handles.stmt, col, SQL_C_CHAR,
+                                                buffer.data(), buffer.size(), &out_len);
+                                if (rc == SQL_ERROR || rc == SQL_INVALID_HANDLE) {
+                                    state.SkipWithError("ODBC fetch failed");
+                                    break;
+                                }
+                                if (rc == SQL_NO_DATA) {
+                                    break;
+                                }
+                                if (out_len == SQL_NULL_DATA) {
+                                    break;
+                                }
                             if (out_len == SQL_NO_TOTAL) {
                                 total_bytes += buffer.size();
                             } else {
@@ -477,13 +581,15 @@ static void BenchOdbc(benchmark::State& state) {
 
     odbc_disconnect(&handles);
     state.SetItemsProcessed(state.iterations() * tuples);
-    state.counters["cpu_user_s"] = cpu_delta.user_s;
-    state.counters["cpu_sys_s"] = cpu_delta.sys_s;
+    if (state.iterations() > 0) {
+        state.counters["cpu_user_ms"] = (cpu_delta.user_s * 1000.0) / state.iterations();
+        state.counters["cpu_sys_ms"] = (cpu_delta.sys_s * 1000.0) / state.iterations();
+    }
 }
 
-static void BenchAdbc(benchmark::State& state) {
+static void BenchAdbc(benchmark::State& state, const TableSpec& table) {
     const int64_t tuples = state.range(0);
-    const std::string query = make_query(tuples);
+    const std::string query = make_query(table, tuples);
 
     struct AdbcError error = {};
     struct AdbcDatabase database = {};
@@ -562,18 +668,46 @@ static void BenchAdbc(benchmark::State& state) {
     AdbcConnectionRelease(&connection, &error);
     AdbcDatabaseRelease(&database, &error);
     state.SetItemsProcessed(state.iterations() * tuples);
-    state.counters["cpu_user_s"] = cpu_delta.user_s;
-    state.counters["cpu_sys_s"] = cpu_delta.sys_s;
+    if (state.iterations() > 0) {
+        state.counters["cpu_user_ms"] = (cpu_delta.user_s * 1000.0) / state.iterations();
+        state.counters["cpu_sys_ms"] = (cpu_delta.sys_s * 1000.0) / state.iterations();
+    }
 }
 
 int main(int argc, char** argv) {
     g_args = parse_cli_params_lenient(argc, argv);
 
-    benchmark::RegisterBenchmark("libpq_sync", BenchLibpqSync)->Arg(g_tuples);
-    benchmark::RegisterBenchmark("libpq_async", BenchLibpqAsync)->Arg(g_tuples);
-    benchmark::RegisterBenchmark("libpq_copy_stdout", BenchLibpqCopyToStdout)->Arg(g_tuples);
-    benchmark::RegisterBenchmark("odbc", BenchOdbc)->Arg(g_tuples);
-    benchmark::RegisterBenchmark("adbc", BenchAdbc)->Arg(g_tuples);
+    for (const auto& table : kTables) {
+        if (!g_tables_filter.empty() &&
+            g_tables_filter.find(table.name) == std::string::npos) {
+            continue;
+        }
+        const std::string base = table.name;
+        benchmark::RegisterBenchmark(("libpq_sync/" + base).c_str(),
+                                     [&table](benchmark::State& state) {
+                                         BenchLibpqSync(state, table);
+                                     })->Arg(g_tuples);
+        benchmark::RegisterBenchmark(("libpq_async/" + base).c_str(),
+                                     [&table](benchmark::State& state) {
+                                         BenchLibpqAsync(state, table);
+                                     })->Arg(g_tuples);
+        benchmark::RegisterBenchmark(("libpq_copy_stdout/" + base).c_str(),
+                                     [&table](benchmark::State& state) {
+                                         BenchLibpqCopyToStdout(state, table);
+                                     })->Arg(g_tuples);
+        benchmark::RegisterBenchmark(("libpq_async_copy_stdout/" + base).c_str(),
+                                     [&table](benchmark::State& state) {
+                                         BenchLibpqAsyncCopyToStdout(state, table);
+                                     })->Arg(g_tuples);
+        benchmark::RegisterBenchmark(("odbc/" + base).c_str(),
+                                     [&table](benchmark::State& state) {
+                                         BenchOdbc(state, table);
+                                     })->Arg(g_tuples);
+        benchmark::RegisterBenchmark(("adbc/" + base).c_str(),
+                                     [&table](benchmark::State& state) {
+                                         BenchAdbc(state, table);
+                                     })->Arg(g_tuples);
+    }
 
     benchmark::Initialize(&argc, argv);
     benchmark::RunSpecifiedBenchmarks();

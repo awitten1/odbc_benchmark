@@ -12,6 +12,7 @@
 #include <sql.h>
 #include <sqlext.h>
 #include <libpq-fe.h>
+#include <sys/resource.h>
 #include <string>
 
 #include "adbc_utils.h"
@@ -254,6 +255,29 @@ static void check_stream(struct ArrowArrayStream* stream, int status) {
     throw std::runtime_error(msg);
 }
 
+struct CpuUsage {
+    double user_s = 0.0;
+    double sys_s = 0.0;
+};
+
+static CpuUsage read_cpu_usage() {
+    struct rusage ru;
+    if (getrusage(RUSAGE_SELF, &ru) != 0) {
+        return {};
+    }
+    auto to_seconds = [](const timeval& tv) -> double {
+        return static_cast<double>(tv.tv_sec) + static_cast<double>(tv.tv_usec) / 1e6;
+    };
+    CpuUsage out;
+    out.user_s = to_seconds(ru.ru_utime);
+    out.sys_s = to_seconds(ru.ru_stime);
+    return out;
+}
+
+static CpuUsage diff_cpu_usage(const CpuUsage& end, const CpuUsage& start) {
+    return {end.user_s - start.user_s, end.sys_s - start.sys_s};
+}
+
 static void BenchLibpqSync(benchmark::State& state) {
     const int64_t tuples = state.range(0);
     const std::string query = make_query(tuples);
@@ -264,12 +288,18 @@ static void BenchLibpqSync(benchmark::State& state) {
         return;
     }
 
+    const CpuUsage cpu_start = read_cpu_usage();
+
     for (auto _ : state) {
         use_synchronous_libpq(conn, query.c_str());
     }
 
+    const CpuUsage cpu_delta = diff_cpu_usage(read_cpu_usage(), cpu_start);
+
     PQfinish(conn);
     state.SetItemsProcessed(state.iterations() * tuples);
+    state.counters["cpu_user_s"] = cpu_delta.user_s;
+    state.counters["cpu_sys_s"] = cpu_delta.sys_s;
 }
 
 static void BenchLibpqAsync(benchmark::State& state) {
@@ -282,12 +312,18 @@ static void BenchLibpqAsync(benchmark::State& state) {
         return;
     }
 
+    const CpuUsage cpu_start = read_cpu_usage();
+
     for (auto _ : state) {
         use_async_libpq(conn, query.c_str());
     }
 
+    const CpuUsage cpu_delta = diff_cpu_usage(read_cpu_usage(), cpu_start);
+
     PQfinish(conn);
     state.SetItemsProcessed(state.iterations() * tuples);
+    state.counters["cpu_user_s"] = cpu_delta.user_s;
+    state.counters["cpu_sys_s"] = cpu_delta.sys_s;
 }
 
 static void BenchLibpqCopyToStdout(benchmark::State& state) {
@@ -300,6 +336,8 @@ static void BenchLibpqCopyToStdout(benchmark::State& state) {
         return;
     }
 
+    const CpuUsage cpu_start = read_cpu_usage();
+
     for (auto _ : state) {
         if (!use_copy_to_stdout_libpq(conn, query.c_str())) {
             state.SkipWithError("libpq copy to stdout failed");
@@ -307,8 +345,12 @@ static void BenchLibpqCopyToStdout(benchmark::State& state) {
         }
     }
 
+    const CpuUsage cpu_delta = diff_cpu_usage(read_cpu_usage(), cpu_start);
+
     PQfinish(conn);
     state.SetItemsProcessed(state.iterations() * tuples);
+    state.counters["cpu_user_s"] = cpu_delta.user_s;
+    state.counters["cpu_sys_s"] = cpu_delta.sys_s;
 }
 
 static void BenchOdbc(benchmark::State& state) {
@@ -322,6 +364,8 @@ static void BenchOdbc(benchmark::State& state) {
         return;
     }
 
+    const CpuUsage cpu_start = read_cpu_usage();
+
     for (auto _ : state) {
         SQLRETURN rc = SQLExecDirect(handles.stmt, (SQLCHAR*)query.c_str(), SQL_NTS);
         if (rc == SQL_SUCCESS || rc == SQL_SUCCESS_WITH_INFO) {
@@ -331,8 +375,12 @@ static void BenchOdbc(benchmark::State& state) {
         SQLCloseCursor(handles.stmt);
     }
 
+    const CpuUsage cpu_delta = diff_cpu_usage(read_cpu_usage(), cpu_start);
+
     odbc_disconnect(&handles);
     state.SetItemsProcessed(state.iterations() * tuples);
+    state.counters["cpu_user_s"] = cpu_delta.user_s;
+    state.counters["cpu_sys_s"] = cpu_delta.sys_s;
 }
 
 static void BenchAdbc(benchmark::State& state) {
@@ -372,6 +420,8 @@ static void BenchAdbc(benchmark::State& state) {
         return;
     }
 
+    const CpuUsage cpu_start = read_cpu_usage();
+
     for (auto _ : state) {
         struct AdbcStatement statement = {};
         struct ArrowArrayStream stream = {};
@@ -409,9 +459,13 @@ static void BenchAdbc(benchmark::State& state) {
         }
     }
 
+    const CpuUsage cpu_delta = diff_cpu_usage(read_cpu_usage(), cpu_start);
+
     AdbcConnectionRelease(&connection, &error);
     AdbcDatabaseRelease(&database, &error);
     state.SetItemsProcessed(state.iterations() * tuples);
+    state.counters["cpu_user_s"] = cpu_delta.user_s;
+    state.counters["cpu_sys_s"] = cpu_delta.sys_s;
 }
 
 int main(int argc, char** argv) {
